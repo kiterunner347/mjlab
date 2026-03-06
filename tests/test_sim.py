@@ -164,3 +164,70 @@ def test_xpos_matches_qpos_after_forward(robot_xml, device):
   sim.forward()
   xpos_fresh = sim.data.xpos[:, 1].clone()
   torch.testing.assert_close(xpos_fresh, qpos_pos, atol=1e-5, rtol=0)
+
+
+def test_step1_step2_equivalent_to_step(robot_xml, device):
+  """step1() + step2() must produce the same result as step()."""
+  model = mujoco.MjModel.from_xml_string(robot_xml)
+  cfg = SimulationCfg(mujoco=MujocoCfg(timestep=0.005))
+
+  # Run step() path.
+  sim_step = Simulation(num_envs=2, cfg=cfg, model=model, device=device)
+  for _ in range(20):
+    sim_step.step()
+  qpos_step = sim_step.data.qpos.clone()
+  qvel_step = sim_step.data.qvel.clone()
+
+  # Run step1()+step2() path with fresh simulation.
+  sim_two = Simulation(num_envs=2, cfg=cfg, model=model, device=device)
+  for _ in range(20):
+    sim_two.step1()
+    sim_two.step2()
+  qpos_two = sim_two.data.qpos.clone()
+  qvel_two = sim_two.data.qvel.clone()
+
+  torch.testing.assert_close(qpos_two, qpos_step, atol=1e-5, rtol=0)
+  torch.testing.assert_close(qvel_two, qvel_step, atol=1e-5, rtol=0)
+
+
+def test_step2_uses_ctrl_set_after_step1(device):
+  """Controls written between step1() and step2() should affect dynamics."""
+  model_xml = """
+    <mujoco>
+      <worldbody>
+        <body name="arm" pos="0 0 1">
+          <joint name="j1" type="hinge" axis="0 1 0"/>
+          <geom type="capsule" size="0.05 0.2" mass="1.0"/>
+          <body name="forearm" pos="0 0 0.4">
+            <joint name="j2" type="hinge" axis="0 1 0"/>
+            <geom type="capsule" size="0.04 0.15" mass="0.5"/>
+          </body>
+        </body>
+      </worldbody>
+      <actuator>
+        <motor joint="j1" gear="10"/>
+        <motor joint="j2" gear="5"/>
+      </actuator>
+    </mujoco>
+  """
+  model = mujoco.MjModel.from_xml_string(model_xml)
+  cfg = SimulationCfg(mujoco=MujocoCfg(timestep=0.005))
+  num_envs = 2
+
+  # Simulation with zero controls.
+  sim_zero = Simulation(num_envs=num_envs, cfg=cfg, model=model, device=device)
+  for _ in range(10):
+    sim_zero.step1()
+    sim_zero.step2()
+  qvel_zero = sim_zero.data.qvel.clone()
+
+  # Simulation with non-zero controls set between step1 and step2.
+  sim_ctrl = Simulation(num_envs=num_envs, cfg=cfg, model=model, device=device)
+  ctrl_value = torch.ones(num_envs, model.nu, device=device)
+  for _ in range(10):
+    sim_ctrl.step1()
+    sim_ctrl.data.ctrl[:] = ctrl_value
+    sim_ctrl.step2()
+
+  # Non-zero control should produce different joint velocities.
+  assert not torch.allclose(sim_ctrl.data.qvel, qvel_zero, atol=1e-4)
