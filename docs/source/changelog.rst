@@ -18,6 +18,12 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added ``Simulation.step1()`` and ``Simulation.step2()`` methods, exposing
+  the two-phase stepping API from ``mjwarp.step1``/``mjwarp.step2``. This
+  mirrors MuJoCo's ``mj_step1``/``mj_step2`` and allows controls or external
+  forces to be modified between the kinematics phase and the dynamics/
+  integration phase. Both methods are captured in CUDA graphs for
+  zero-overhead replay.
 - Added ``"step"`` event mode that fires every environment step.
 - Added ``apply_body_impulse`` event for applying transient external wrenches
   to bodies with configurable duration and optional application point offset.

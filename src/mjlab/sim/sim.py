@@ -115,10 +115,10 @@ class Simulation:
   CUDA Graph Capture
   ------------------
   On CUDA devices with memory pools enabled, the simulation captures CUDA graphs
-  for ``step()``, ``forward()``, and ``reset()`` operations. Graph capture records
-  a sequence of GPU kernels and their memory addresses, then replays the entire
-  sequence with a single kernel launch, eliminating CPU overhead from repeated
-  kernel dispatches.
+  for ``step()``, ``step1()``, ``step2()``, ``forward()``, and ``reset()``
+  operations. Graph capture records a sequence of GPU kernels and their memory
+  addresses, then replays the entire sequence with a single kernel launch,
+  eliminating CPU overhead from repeated kernel dispatches.
 
   **Important:** A captured graph holds pointers to the GPU arrays that existed
   at capture time. If those arrays are later replaced (e.g., via
@@ -129,6 +129,19 @@ class Simulation:
   If you write code that replaces model or data arrays after simulation
   initialization, you **must** call ``create_graph()`` afterward to re-capture
   the graphs with the new memory addresses.
+
+  Two-Phase Stepping
+  ------------------
+  ``step1()`` and ``step2()`` provide a two-phase stepping API mirroring
+  MuJoCo's ``mj_step1``/``mj_step2``. Call ``step1()`` to compute forward
+  kinematics and velocities, modify controls or external forces, then call
+  ``step2()`` to compute forward dynamics and integrate:
+
+  .. code-block:: python
+
+      sim.step1()             # kinematics + velocity dynamics
+      sim.data.ctrl[:] = u    # set controls between phases
+      sim.step2()             # forward dynamics + integration
   """
 
   def __init__(
@@ -188,6 +201,8 @@ class Simulation:
     On CPU devices or when memory pools are disabled, this is a no-op.
     """
     self.step_graph = None
+    self.step1_graph = None
+    self.step2_graph = None
     self.forward_graph = None
     self.reset_graph = None
     self.sense_graph = None
@@ -196,6 +211,12 @@ class Simulation:
         with wp.ScopedCapture() as capture:
           mjwarp.step(self.wp_model, self.wp_data)
         self.step_graph = capture.graph
+        with wp.ScopedCapture() as capture:
+          mjwarp.step1(self.wp_model, self.wp_data)
+        self.step1_graph = capture.graph
+        with wp.ScopedCapture() as capture:
+          mjwarp.step2(self.wp_model, self.wp_data)
+        self.step2_graph = capture.graph
         with wp.ScopedCapture() as capture:
           mjwarp.forward(self.wp_model, self.wp_data)
         self.forward_graph = capture.graph
@@ -310,6 +331,40 @@ class Simulation:
           wp.capture_launch(self.step_graph)
         else:
           mjwarp.step(self.wp_model, self.wp_data)
+
+  def step1(self) -> None:
+    """Run the first phase of a two-phase simulation step.
+
+    Computes forward kinematics, velocities, and position/velocity sensors
+    before the user sets controls or external forces. Must be followed by
+    ``step2()`` to complete the physics step.
+
+    This mirrors MuJoCo's ``mj_step1``/``mj_step2`` API, allowing inspection
+    or modification of state (e.g. writing ``data.ctrl``) between the two
+    phases.
+    """
+    with wp.ScopedDevice(self.wp_device):
+      if self.use_cuda_graph and self.step1_graph is not None:
+        wp.capture_launch(self.step1_graph)
+      else:
+        mjwarp.step1(self.wp_model, self.wp_data)
+
+  def step2(self) -> None:
+    """Run the second phase of a two-phase simulation step.
+
+    Computes actuation forces, forward dynamics (``qacc``), solves
+    constraints, and integrates the state. Must be called after ``step1()``.
+
+    This mirrors MuJoCo's ``mj_step1``/``mj_step2`` API, allowing inspection
+    or modification of state (e.g. writing ``data.ctrl``) between the two
+    phases.
+    """
+    with wp.ScopedDevice(self.wp_device):
+      with self.nan_guard.watch(self.data):
+        if self.use_cuda_graph and self.step2_graph is not None:
+          wp.capture_launch(self.step2_graph)
+        else:
+          mjwarp.step2(self.wp_model, self.wp_data)
 
   def reset(self, env_ids: torch.Tensor | None = None) -> None:
     with wp.ScopedDevice(self.wp_device):
